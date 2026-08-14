@@ -1,0 +1,8 @@
+build/
+analysis_mp4
+*.o
+*.d
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
