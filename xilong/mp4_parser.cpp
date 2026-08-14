@@ -7,6 +7,12 @@
 #include <iomanip>
 #include <functional>
 
+// SeeVision 私有 UUID: 53 58 4d 44 2d 53 45 45 56 49 53 49 4f 4e 01 01
+static const uint8_t SEEVISION_SXMD_UUID[16] = {
+    0x53, 0x58, 0x4d, 0x44, 0x2d, 0x53, 0x45, 0x45,
+    0x56, 0x49, 0x53, 0x49, 0x4f, 0x4e, 0x01, 0x01
+};
+
 // ============================================================
 // 构造函数 / 析构函数
 // ============================================================
@@ -995,8 +1001,129 @@ void Mp4Parser::parse_box_fields(FILE* f, const std::shared_ptr<Mp4Box>& box, in
         dump_stco(f, box, depth);
     } else if (memcmp(box->type, "elst", 4) == 0) {
         dump_elst(f, box, depth);
+    } else if (memcmp(box->type, "uuid", 4) == 0) {
+        dump_uuid(f, box, depth);
     } else if (memcmp(box->type, "mdat", 4) == 0) {
         dump_mdat(f, box, depth);
+    }
+}
+
+// ---------- uuid (含 SXMD 检测) ----------
+void Mp4Parser::dump_uuid(FILE* f, const std::shared_ptr<Mp4Box>& box, int depth) {
+    write_indent(f, depth + 1);
+    fprintf(f, "UUID: ");
+    for (int i = 0; i < 16; ++i) {
+        fprintf(f, "%02x", box->uuid[i]);
+        if (i == 3 || i == 5 || i == 7 || i == 9) fprintf(f, "-");
+    }
+    fprintf(f, "\n");
+
+    // 检查是否为 SeeVision SXMD
+    SxmdInfo sxmd;
+    if (try_parse_sxmd(box, sxmd)) {
+        write_indent(f, depth + 1);
+        fprintf(f, "=== SeeVision SXMD (私有元数据) ===\n");
+        write_indent(f, depth + 1);
+        fprintf(f, "Magic: SXMD\n");
+        write_indent(f, depth + 1);
+        fprintf(f, "Version: %u\n", sxmd.version);
+        write_indent(f, depth + 1);
+        fprintf(f, "Record Type: %u (%s)\n", sxmd.record_type, sxmd.record_type_str().c_str());
+        write_indent(f, depth + 1);
+        fprintf(f, "Flags: 0x%02x", sxmd.flags);
+        if (sxmd.flags & 0x01) fprintf(f, " [no_audio]");
+        if (sxmd.flags & 0x02) fprintf(f, " [timestamp_modified]");
+        fprintf(f, "\n");
+        write_indent(f, depth + 1);
+        fprintf(f, "Slow Motion Multiplier: %u (x%.2f)\n",
+                sxmd.slow_motion_multiplier_x100,
+                sxmd.slow_motion_multiplier_x100 / 100.0);
+        write_indent(f, depth + 1);
+        fprintf(f, "Timelapse Multiplier: %u (x%.2f)\n",
+                sxmd.timelapse_multiplier_x100,
+                sxmd.timelapse_multiplier_x100 / 100.0);
+        write_indent(f, depth + 1);
+        fprintf(f, "Timelapse Interval Frame: %u\n", sxmd.timelapse_interval_frame);
+        write_indent(f, depth + 1);
+        fprintf(f, "Target FPS: %u\n", sxmd.target_fps);
+
+        // 业务含义
+        write_indent(f, depth + 1);
+        if (sxmd.is_slow_motion()) {
+            fprintf(f, "\u2192 \u8fd9\u662f\u4e00\u4e2a\u6162\u52a8\u4f5c\u5f55\u50cf (x%.1f \u6162\u653e)\n",
+                    sxmd.slow_motion_multiplier_x100 / 100.0);
+        } else if (sxmd.record_type == 2) {
+            fprintf(f, "\u2192 \u8fd9\u662f\u4e00\u4e2a\u9759\u6b62\u5ef6\u65f6\u5f55\u50cf (x%.1f \u52a0\u901f)\n",
+                    sxmd.timelapse_multiplier_x100 / 100.0);
+        } else if (sxmd.record_type == 3) {
+            fprintf(f, "\u2192 \u8fd9\u662f\u4e00\u4e2a\u8fd0\u52a8\u5ef6\u65f6\u5f55\u50cf (x%.1f \u52a0\u901f)\n",
+                    sxmd.timelapse_multiplier_x100 / 100.0);
+        } else if (sxmd.record_type == 4) {
+            fprintf(f, "\u2192 \u8fd9\u662f\u4e00\u4e2a\u8f68\u8ff9\u5ef6\u65f6\u5f55\u50cf (x%.1f \u52a0\u901f)\n",
+                    sxmd.timelapse_multiplier_x100 / 100.0);
+        }
+    } else {
+        write_indent(f, depth + 1);
+        fprintf(f, "(\u672a\u77e5 UUID \u7c7b\u578b)\n");
+    }
+}
+
+bool Mp4Parser::try_parse_sxmd(const std::shared_ptr<Mp4Box>& box, SxmdInfo& info) {
+    // 检查是否为 uuid box
+    if (memcmp(box->type, "uuid", 4) != 0) return false;
+
+    // 检查 UUID 是否匹配 SeeVision
+    if (memcmp(box->uuid, SEEVISION_SXMD_UUID, 16) != 0) return false;
+
+    // 检查 payload 大小: magic(4) + version(1) + record_type(1) + flags(1) + reserved(1)
+    //   + slow_motion(4) + timelapse(4) + interval(4) + target_fps(4) = 24 bytes
+    if (box->raw_data.size() < 24) return false;
+
+    const uint8_t* d = box->raw_data.data();
+
+    // 检查 magic
+    if (d[0] != 'S' || d[1] != 'X' || d[2] != 'M' || d[3] != 'D') return false;
+
+    info.valid = true;
+    info.version = d[4];
+
+    // 只支持 version 1
+    if (info.version != 1) return false;
+
+    info.record_type = d[5];
+    info.flags = d[6];
+    // d[7] = reserved0
+
+    info.slow_motion_multiplier_x100 = buf_read_uint32_be(d, 8);
+    info.timelapse_multiplier_x100 = buf_read_uint32_be(d, 12);
+    info.timelapse_interval_frame = buf_read_uint32_be(d, 16);
+    info.target_fps = buf_read_uint32_be(d, 20);
+
+    // 基本合法性检查
+    if (info.record_type > 4) return false;
+    if (info.slow_motion_multiplier_x100 < 100) return false;
+    if (info.timelapse_multiplier_x100 < 100) return false;
+
+    return true;
+}
+
+// ============================================================
+// 收集 SXMD 信息
+// ============================================================
+void Mp4Parser::collect_sxmd(std::vector<SxmdInfo>& result) const {
+    for (const auto& box : m_top_boxes) {
+        collect_sxmd_recursive(box, result);
+    }
+}
+
+void Mp4Parser::collect_sxmd_recursive(const std::shared_ptr<Mp4Box>& box, std::vector<SxmdInfo>& result) {
+    if (!box) return;
+    SxmdInfo info;
+    if (try_parse_sxmd(box, info)) {
+        result.push_back(info);
+    }
+    for (const auto& child : box->children) {
+        collect_sxmd_recursive(child, result);
     }
 }
 
