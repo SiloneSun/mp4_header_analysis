@@ -897,3 +897,225 @@ bool write_mp4_html_report(const Mp4Parser& parser,
     ofs.write(s.c_str(), (std::streamsize)s.size());
     return ofs.good();
 }
+
+// ============================================================
+// Markdown 报告生成 (面向 AI agent 阅读理解)
+// ============================================================
+
+static void md_box_tree(std::ostringstream& o, const Mp4Box& box, int depth) {
+    std::string indent(depth * 2, ' ');
+    o << indent << "- `" << box.type << "` (size=" << box.box_size
+      << ", offset=" << hex_str_64(box.file_offset) << ")";
+    if (std::string(box.type) == "uuid") {
+        o << " [UUID]";
+    }
+    o << "\n";
+    for (const auto& child : box.children) {
+        md_box_tree(o, *child, depth + 1);
+    }
+}
+
+bool write_mp4_md_report(const Mp4Parser& parser,
+                         const std::string& source_filepath,
+                         uint64_t file_size,
+                         const std::string& output_path,
+                         const sunxilong::AnalyzeResult* qc_result,
+                         const sunxilong::AnalyzeOptions* qc_opt)
+{
+    std::ostringstream o;
+    const auto& boxes = parser.get_top_boxes();
+    bool has_qc = (qc_result && qc_result->valid);
+
+    // 收集 SXMD
+    std::vector<SxmdInfo> sxmd_list;
+    parser.collect_sxmd(sxmd_list);
+
+    // 时间戳
+    char timebuf[64];
+    time_t now = time(nullptr);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", &tmv);
+
+    // 标题
+    o << "# MP4 综合分析报告\n\n";
+    o << "> 生成时间: " << timebuf << "\n\n";
+
+    // 文件概览
+    o << "## 1. 文件概览\n\n";
+    o << "| 项目 | 值 |\n";
+    o << "|------|------|\n";
+    o << "| 文件路径 | " << source_filepath << " |\n";
+    o << "| 文件大小 | " << size_human(file_size) << " (" << file_size << " bytes) |\n";
+    o << "| 顶层 Box 数 | " << boxes.size() << " |\n";
+
+    // 统计 box 总数
+    size_t total_boxes = 0;
+    std::function<void(const Mp4Box&)> count_boxes = [&](const Mp4Box& b) {
+        total_boxes++;
+        for (const auto& c : b.children) count_boxes(*c);
+    };
+    for (const auto& box : boxes) count_boxes(*box);
+    o << "| Box 总数 (含嵌套) | " << total_boxes << " |\n";
+
+    if (has_qc) {
+        o << "| 编码格式 | " << qc_result->codec_name << " |\n";
+        o << "| 分辨率 | " << qc_result->width << "x" << qc_result->height << " |\n";
+        o << "| 时长 | " << fmt_time(qc_result->duration_sec) << " (" << fmt_num(qc_result->duration_sec, 2) << " s) |\n";
+        o << "| 总帧数 | " << qc_result->frames.size() << " |\n";
+        o << "| 容器帧率 | " << fmt_num(qc_result->container_fps, 3) << " fps |\n";
+        o << "| 实测帧率 | " << fmt_num(qc_result->measured_fps, 3) << " fps |\n";
+    }
+    o << "\n";
+
+    // SXMD 元数据
+    o << "## 2. SXMD 私有元数据\n\n";
+    if (sxmd_list.empty()) {
+        o << "未检测到 SXMD 元数据 (普通录像)\n\n";
+    } else {
+        for (size_t i = 0; i < sxmd_list.size(); ++i) {
+            const SxmdInfo& s = sxmd_list[i];
+            o << "### SXMD #" << i << "\n\n";
+            o << "| 字段 | 值 |\n";
+            o << "|------|------|\n";
+            o << "| Record Type | " << (int)s.record_type << " (" << s.record_type_str() << ") |\n";
+            o << "| Flags | 0x" << std::hex << (int)s.flags << std::dec;
+            if (s.flags & 0x01) o << " [no_audio]";
+            if (s.flags & 0x02) o << " [timestamp_modified]";
+            o << " |\n";
+            if (s.is_slow_motion()) {
+                o << "| 慢动作倍数 | x" << fmt_num(s.slow_motion_multiplier_x100 / 100.0, 1) << " |\n";
+            }
+            if (s.is_timelapse()) {
+                o << "| 延时倍数 | x" << fmt_num(s.timelapse_multiplier_x100 / 100.0, 1) << " |\n";
+                o << "| 延时间隔帧 | " << s.timelapse_interval_frame << " |\n";
+                o << "| 目标 FPS | " << s.target_fps << " |\n";
+            }
+            o << "\n";
+        }
+    }
+
+    // 质量分析
+    if (has_qc) {
+        const double expected_ms = 1000.0 / qc_result->preset_fps;
+        const double drop_th_ms = expected_ms * (qc_opt ? qc_opt->drop_ratio : 1.5);
+        const double fast_th_ms = expected_ms * (qc_opt ? qc_opt->fast_ratio : 0.5);
+
+        o << "## 3. 质量检查结论\n\n";
+        o << "| 检查项 | 结果 |\n";
+        o << "|--------|------|\n";
+        o << "| 预设帧率 | " << fmt_num(qc_result->preset_fps, 1) << " fps |\n";
+        o << "| 预期间隔 | " << fmt_num(expected_ms, 2) << " ms |\n";
+        o << "| 丢帧阈值 | > " << fmt_num(drop_th_ms, 2) << " ms |\n";
+        o << "| 超快帧阈值 | < " << fmt_num(fast_th_ms, 2) << " ms |\n";
+        o << "| 帧率检查 | " << (qc_result->fps_ok ? "**PASS**" : "**FAIL**") << " |\n";
+        o << "| 丢帧事件数 | " << qc_result->drop_events.size() << " |\n";
+        o << "| 估计丢失帧总数 | " << qc_result->total_dropped_frames << " |\n";
+        o << "| 超快帧事件数 | " << qc_result->fast_events.size() << " |\n";
+        o << "| PTS 异常帧数 | " << qc_result->bad_pts_count << " |\n";
+        o << "\n";
+
+        // 码率统计
+        o << "## 4. 码率分析\n\n";
+        o << "| 指标 | 值 |\n";
+        o << "|------|------|\n";
+        o << "| 平均码率 | " << fmt_num(qc_result->vbr.avg_kbps, 0) << " kbps |\n";
+        o << "| 最大秒级码率 | " << fmt_num(qc_result->vbr.max_kbps, 0) << " kbps |\n";
+        o << "| 最小秒级码率 | " << fmt_num(qc_result->vbr.min_kbps, 0) << " kbps |\n";
+        o << "| 标准差 | " << fmt_num(qc_result->vbr.stddev_kbps, 0) << " kbps |\n";
+        double cv = (qc_result->vbr.avg_kbps > 0) ? (qc_result->vbr.stddev_kbps / qc_result->vbr.avg_kbps * 100.0) : 0.0;
+        o << "| 波动系数 (CV) | " << fmt_num(cv, 1) << "% |\n";
+        o << "| 视频数据量 | " << size_human(qc_result->video_bytes) << " |\n";
+        o << "\n";
+
+        // 每秒码率明细
+        if (!qc_result->vbr.per_second_kbps.empty()) {
+            o << "### 4.1 每秒码率明细\n\n";
+            o << "| 秒序号 | 时间 | 码率 (kbps) |\n";
+            o << "|--------|------|-------------|\n";
+            for (size_t i = 0; i < qc_result->vbr.per_second_kbps.size(); ++i) {
+                o << "| " << i << " | " << fmt_axis_time((double)i) << " | "
+                  << fmt_num(qc_result->vbr.per_second_kbps[i], 0) << " |\n";
+            }
+            o << "\n";
+        }
+
+        // 丢帧事件明细
+        if (!qc_result->drop_events.empty()) {
+            o << "## 5. 丢帧事件明细\n\n";
+            o << "| 序号 | 帧序号 | 时间 | 实际间隔 (ms) | 预期间隔 (ms) | 估计丢失帧数 |\n";
+            o << "|------|--------|------|---------------|---------------|--------------|\n";
+            for (size_t i = 0; i < qc_result->drop_events.size(); ++i) {
+                const auto& e = qc_result->drop_events[i];
+                o << "| " << i << " | " << e.frame_index << " | " << fmt_time(e.t)
+                  << " | " << fmt_num(e.gap_ms, 1) << " | " << fmt_num(e.expected_ms, 1)
+                  << " | " << e.dropped_count << " |\n";
+            }
+            o << "\n";
+        } else {
+            o << "## 5. 丢帧事件明细\n\n";
+            o << "无丢帧事件。\n\n";
+        }
+
+        // 超快帧事件明细
+        if (!qc_result->fast_events.empty()) {
+            o << "## 6. 超快帧事件明细\n\n";
+            o << "| 序号 | 帧序号 | 时间 | 实际间隔 (ms) | 预期间隔 (ms) |\n";
+            o << "|------|--------|------|---------------|---------------|\n";
+            for (size_t i = 0; i < qc_result->fast_events.size(); ++i) {
+                const auto& e = qc_result->fast_events[i];
+                o << "| " << i << " | " << e.frame_index << " | " << fmt_time(e.t)
+                  << " | " << fmt_num(e.gap_ms, 1) << " | " << fmt_num(e.expected_ms, 1) << " |\n";
+            }
+            o << "\n";
+        } else {
+            o << "## 6. 超快帧事件明细\n\n";
+            o << "无超快帧事件。\n\n";
+        }
+
+        // 帧间隔分布统计
+        o << "## 7. 帧间隔分布统计\n\n";
+        if (!qc_result->intervals_ms.empty()) {
+            double min_iv = *std::min_element(qc_result->intervals_ms.begin(), qc_result->intervals_ms.end());
+            double max_iv = *std::max_element(qc_result->intervals_ms.begin(), qc_result->intervals_ms.end());
+            double sum_iv = 0;
+            for (double v : qc_result->intervals_ms) sum_iv += v;
+            double avg_iv = sum_iv / qc_result->intervals_ms.size();
+            double sq_sum = 0;
+            for (double v : qc_result->intervals_ms) sq_sum += (v - avg_iv) * (v - avg_iv);
+            double std_iv = std::sqrt(sq_sum / qc_result->intervals_ms.size());
+
+            o << "| 统计项 | 值 (ms) |\n";
+            o << "|--------|---------|\n";
+            o << "| 最小帧间隔 | " << fmt_num(min_iv, 2) << " |\n";
+            o << "| 最大帧间隔 | " << fmt_num(max_iv, 2) << " |\n";
+            o << "| 平均帧间隔 | " << fmt_num(avg_iv, 2) << " |\n";
+            o << "| 帧间隔标准差 | " << fmt_num(std_iv, 2) << " |\n";
+            o << "| 帧间隔样本数 | " << qc_result->intervals_ms.size() << " |\n";
+            o << "\n";
+        }
+
+        // Box 结构树
+        o << "## 8. Box 结构树\n\n";
+        o << "```\n";
+        for (const auto& box : boxes) {
+            md_box_tree(o, *box, 0);
+        }
+        o << "```\n\n";
+    } else {
+        // 无质量分析时，只显示 Box 结构树
+        o << "## 3. Box 结构树\n\n";
+        o << "```\n";
+        for (const auto& box : boxes) {
+            md_box_tree(o, *box, 0);
+        }
+        o << "```\n\n";
+    }
+
+    // 写入文件
+    std::ofstream ofs(output_path.c_str(), std::ios::binary);
+    if (!ofs.is_open()) return false;
+    const std::string s = o.str();
+    ofs.write(s.c_str(), (std::streamsize)s.size());
+    return ofs.good();
+}

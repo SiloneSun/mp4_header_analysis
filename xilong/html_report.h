@@ -14,4 +14,12 @@ bool write_mp4_html_report(const Mp4Parser& parser,
                            const sunxilong::AnalyzeResult* qc_result = nullptr,
                            const sunxilong::AnalyzeOptions* qc_opt = nullptr);
 
+// 生成 Markdown 分析报告 (面向 AI agent 阅读理解)
+bool write_mp4_md_report(const Mp4Parser& parser,
+                         const std::string& source_filepath,
+                         uint64_t file_size,
+                         const std::string& output_path,
+                         const sunxilong::AnalyzeResult* qc_result = nullptr,
+                         const sunxilong::AnalyzeOptions* qc_opt = nullptr);
+
 #endif
