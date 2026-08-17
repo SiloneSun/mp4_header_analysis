@@ -98,15 +98,24 @@ int main(int argc, char* argv[])
     }
 
     if (output_fmt == FMT_HTML) {
-        std::string outputFile = baseName + "_report.html";
-        LOGD("Output file: %s", outputFile.c_str());
-        if (!write_mp4_html_report(parser, filePath, file_size, outputFile,
+        // 默认同时生成 HTML + MD
+        std::string htmlFile = baseName + "_report.html";
+        std::string mdFile = baseName + "_report.md";
+        LOGD("Output files: %s, %s", htmlFile.c_str(), mdFile.c_str());
+        if (!write_mp4_html_report(parser, filePath, file_size, htmlFile,
                                    has_qc ? &qc_result : nullptr,
                                    has_qc ? &qc_opt : nullptr)) {
-            LOGD("Failed to write HTML report to: %s", outputFile.c_str());
+            LOGD("Failed to write HTML report to: %s", htmlFile.c_str());
             return 1;
         }
-        LOGD("HTML report written to: %s", outputFile.c_str());
+        LOGD("HTML report written to: %s", htmlFile.c_str());
+        if (!write_mp4_md_report(parser, filePath, file_size, mdFile,
+                                 has_qc ? &qc_result : nullptr,
+                                 has_qc ? &qc_opt : nullptr)) {
+            LOGD("Failed to write Markdown report to: %s", mdFile.c_str());
+            return 1;
+        }
+        LOGD("Markdown report written to: %s", mdFile.c_str());
     } else if (output_fmt == FMT_MD) {
         std::string outputFile = baseName + "_report.md";
         LOGD("Output file: %s", outputFile.c_str());
