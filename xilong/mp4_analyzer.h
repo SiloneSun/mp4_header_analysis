@@ -40,6 +40,26 @@ struct BitrateStats {
     std::vector<double> per_second_kbps; // 每秒码率(kbps)
 };
 
+// 音频分析结果
+struct AudioResult {
+    bool valid = false;           // 是否存在可分析的音频流
+    std::string codec_name;       // 音频编码, 如 aac
+    int sample_rate = 0;          // 采样率, 如 48000
+    int channels = 0;             // 声道数
+    int frame_size = 0;           // 每包采样数(AAC=1024), 无法确定时为0
+    int64_t total_bytes = 0;      // 音频流总字节数
+    double duration_sec = 0.0;    // 音频时长(秒)
+    int packet_count = 0;         // 音频包总数
+
+    // 丢包检测 (基于相邻包 PTS 间隔与预期包时长对比)
+    double expected_pkt_ms = 0.0; // 预期包时长(ms), frame_size 无法确定时为0(不检测)
+    std::vector<GapEvent> drop_events; // 丢包事件
+    int total_dropped_packets = 0;     // 估计丢失包总数
+
+    BitrateStats vbr;             // 音频码率统计
+    std::string note;             // 备注(如"包时长未知, 未检测丢包")
+};
+
 // 分析结果
 struct AnalyzeResult {
     // 文件/流信息
@@ -66,6 +86,8 @@ struct AnalyzeResult {
     int bad_pts_count = 0;              // pts 不单调/重复的数量
 
     BitrateStats vbr;                   // 视频码率统计
+
+    AudioResult audio;                  // 音频分析结果
 
     bool valid = false;
     std::string error;

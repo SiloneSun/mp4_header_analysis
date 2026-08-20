@@ -40,6 +40,7 @@ int main(int argc, char* argv[])
     // 从输入文件路径中提取文件名（不含目录）
     size_t lastSlash = inputPath.find_last_of("/\\");
     std::string fileName = (lastSlash == std::string::npos) ? inputPath : inputPath.substr(lastSlash + 1);
+    std::string fileDir = (lastSlash == std::string::npos) ? "" : inputPath.substr(0, lastSlash + 1);
     
     // 移除扩展名
     size_t lastDot = fileName.find_last_of('.');
@@ -80,6 +81,14 @@ int main(int argc, char* argv[])
             printf("丢帧事件: %zu 处, 估计丢失帧: %d\n", qc_result.drop_events.size(), qc_result.total_dropped_frames);
             printf("超快帧事件: %zu 处\n", qc_result.fast_events.size());
             printf("平均码率: %.0f kbps, 波动: %.0f kbps\n", qc_result.vbr.avg_kbps, qc_result.vbr.stddev_kbps);
+            if (qc_result.audio.valid) {
+                printf("音频: %s, %d Hz, %d ch, %d 包\n", qc_result.audio.codec_name.c_str(),
+                       qc_result.audio.sample_rate, qc_result.audio.channels, qc_result.audio.packet_count);
+                printf("音频丢包事件: %zu 处, 估计丢失包: %d\n",
+                       qc_result.audio.drop_events.size(), qc_result.audio.total_dropped_packets);
+            } else if (!qc_result.audio.note.empty()) {
+                printf("音频: %s\n", qc_result.audio.note.c_str());
+            }
         } else {
             printf("质量分析失败: %s\n", qc_result.error.c_str());
         }
@@ -99,8 +108,8 @@ int main(int argc, char* argv[])
 
     if (output_fmt == FMT_HTML) {
         // 默认同时生成 HTML + MD
-        std::string htmlFile = baseName + "_report.html";
-        std::string mdFile = baseName + "_report.md";
+        std::string htmlFile = fileDir + baseName + "_report.html";
+        std::string mdFile = fileDir + baseName + "_report.md";
         LOGD("Output files: %s, %s", htmlFile.c_str(), mdFile.c_str());
         if (!write_mp4_html_report(parser, filePath, file_size, htmlFile,
                                    has_qc ? &qc_result : nullptr,
@@ -117,7 +126,7 @@ int main(int argc, char* argv[])
         }
         LOGD("Markdown report written to: %s", mdFile.c_str());
     } else if (output_fmt == FMT_MD) {
-        std::string outputFile = baseName + "_report.md";
+        std::string outputFile = fileDir + baseName + "_report.md";
         LOGD("Output file: %s", outputFile.c_str());
         if (!write_mp4_md_report(parser, filePath, file_size, outputFile,
                                  has_qc ? &qc_result : nullptr,
@@ -127,7 +136,7 @@ int main(int argc, char* argv[])
         }
         LOGD("Markdown report written to: %s", outputFile.c_str());
     } else {
-        std::string outputFile = baseName + "_header.txt";
+        std::string outputFile = fileDir + baseName + "_header.txt";
         LOGD("Output file: %s", outputFile.c_str());
         if (!parser.dump_header_to_txt(outputFile)) {
             LOGD("Failed to write header analysis to: %s", outputFile.c_str());
