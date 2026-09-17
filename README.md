@@ -18,7 +18,9 @@
 
   
 ## 示例
-[html报告示例](./res/20260814_104709_V0128_report.html)
+[html报告示例1](./res/screenshot-20260917-173713.png)
+[html报告示例2](./res/screenshot-20260917-173727.png)
+[html报告示例3](./res/screenshot-20260917-173738.png)
 
 ## 依赖
 
